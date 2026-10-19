@@ -23,7 +23,17 @@ all: $(OBJS)
 	@$(CC) $(CFLAGS) -c $<
 	@$(CC) $(CFLAGS) -MM $< > $*.d
 
+# tests/ is not part of $(wildcard *.c), so this does not change ./cs238.
+test_sched: scheduler.c system.c tests/test_sched.c
+	@echo "[CC]" test_sched
+	@$(CC) $(CFLAGS) -I. -o test_sched scheduler.c system.c tests/test_sched.c $(LDLIBS)
+
+test: test_sched
+	./test_sched
+
+.PHONY: test
+
 clean:
-	@rm -f $(DEST) *.so *.o *.d *~ *#
+	@rm -f $(DEST) test_sched *.so *.o *.d *~ *#
 
 -include $(OBJS:.o=.d)

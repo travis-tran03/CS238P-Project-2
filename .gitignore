@@ -1,0 +1,8 @@
+# Build outputs. Matches the files removed by `make clean`.
+cs238
+test_sched
+*.o
+*.d
+*.so
+*~
+*#
