@@ -68,6 +68,7 @@ test_only(void)
 /*
  * Three threads, each yielding three times. With no sleeping this finishes
  * long before the one-second alarm, so the order is pure round-robin.
+ * create() inserts at the front, so the newest thread runs first: c, b, a.
  */
 
 static char rr_log[32];
@@ -99,7 +100,7 @@ test_rr(void)
 	if (ok) {
 		scheduler_execute();
 		rr_log[rr_n] = 0;
-		ok = strcmp(rr_log, "abcabcabc") == 0;
+		ok = strcmp(rr_log, "cbacbacba") == 0;
 	}
 	if (!ok) {
 		printf("  log \"%s\"\n", rr_log);
@@ -268,8 +269,9 @@ test_sleep(void)
 	fflush(stdout);
 	other_ran = 0;
 	seen_other = 0;
-	ok = scheduler_create(greedy_sleep, 0) == 0 &&
-		scheduler_create(other_thread, 0) == 0;
+	/* Newest thread is the head of the list, so the greedy one runs first. */
+	ok = scheduler_create(other_thread, 0) == 0 &&
+		scheduler_create(greedy_sleep, 0) == 0;
 	if (ok) {
 		scheduler_execute();
 		ok = seen_other == 1;
@@ -309,8 +311,8 @@ test_cpu(void)
 	steps_end = 0;
 	start = clock();
 	ok = start != (clock_t)-1 &&
-		scheduler_create(greedy_cpu, 0) == 0 &&
-		scheduler_create(other_thread, 0) == 0;
+		scheduler_create(other_thread, 0) == 0 &&
+		scheduler_create(greedy_cpu, 0) == 0;
 	if (ok) {
 		scheduler_execute();
 		ok = other_at > 0 && other_at < steps_end;

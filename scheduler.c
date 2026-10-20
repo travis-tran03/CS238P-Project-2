@@ -24,24 +24,31 @@
 
 /* research the above Needed API and design accordingly */
 
-/* Room for libc calls, and larger than MINSIGSTKSZ. */
-#define THREAD_STACK_SIZE (64 * 1024)
 
-struct thread {
-	sigjmp_buf ctx;
-	volatile int done;
-	scheduler_fnc_t fnc;
-	void *arg;
-	void *stack_mem;
-	struct thread *next;
+enum status {
+	INIT,
+	RUNNING,
+	RUNNABLE,
+	TERMINATED
 };
 
-static struct thread *head;
-static struct thread *tail;
-static struct thread *current;
-static struct thread *new_thread;
-static sigjmp_buf sched_ctx;
-static sigjmp_buf create_ctx;
+struct thread {
+	enum status status;
+	struct {
+		void *mem;		/* malloc pointer, used with free */
+		void *sp;		/* page-aligned top of the stack */
+	} stack;
+	struct {
+		scheduler_fnc_t function;
+		void *argument;
+	} code;
+	jmp_buf ctx;
+	struct thread *link;
+};
+
+static struct thread *root;
+static struct thread *curr;
+static jmp_buf ctx;
 static sigset_t alarm_set;
 
 static void
@@ -56,47 +63,72 @@ unblock_alarm(void)
 	sigprocmask(SIG_UNBLOCK, &alarm_set, NULL);
 }
 
-/* Live thread after prev, wrapping around the creation-order list. */
+static void
+thread_start(void)
+{
+	unblock_alarm();
+	curr->code.function(curr->code.argument);
+	curr->status = TERMINATED;
+	block_alarm();
+	longjmp(ctx, 1);
+}
+
+/* First RUNNABLE or INIT thread after curr, wrapping to root. */
 static struct thread *
-next_thread(struct thread *prev)
+thread_candidate(void)
 {
 	struct thread *start;
 	struct thread *t;
 
-	if (!head) {
+	if (!root) {
 		return NULL;
 	}
-	if (prev && prev->next) {
-		start = prev->next;
+	if (curr && curr->link) {
+		start = curr->link;
 	} else {
-		start = head;
+		start = root;
 	}
 	t = start;
 	do {
-		if (!t->done) {
+		if (t->status == INIT || t->status == RUNNABLE) {
 			return t;
 		}
-		if (t->next) {
-			t = t->next;
+		if (t->link) {
+			t = t->link;
 		} else {
-			t = head;
+			t = root;
 		}
 	} while (t != start);
 	return NULL;
 }
 
-void
-scheduler_yield(void)
+static void
+schedule(void)
 {
-	/*
-	 * Block the tick first so it cannot land halfway through a switch.
-	 * Coming back means this thread was chosen again: allow the tick.
-	 */
-	block_alarm();
-	if (sigsetjmp(current->ctx, 0) == 0) {
-		siglongjmp(sched_ctx, 1);
+	struct thread *t;
+	void *sp;
+	void (*start)(void);
+
+	t = thread_candidate();
+	if (!t) {
+		return;
 	}
-	unblock_alarm();
+	curr = t;
+	if (t->status == RUNNABLE) {
+		t->status = RUNNING;
+		longjmp(t->ctx, 1);
+	}
+
+	t->status = RUNNING;
+	sp = t->stack.sp;
+	start = thread_start;
+	__asm__ __volatile__ (
+		"movq %[sp], %%rsp\n\t"
+		"call *%[fn]\n\t"
+		:
+		: [sp] "r" (sp), [fn] "r" (start)
+		: "memory"
+	);
 }
 
 static void
@@ -115,7 +147,6 @@ start_preemption(void)
 	sigemptyset(&alarm_set);
 	sigaddset(&alarm_set, SIGALRM);
 	block_alarm();
-
 	memset(&sa, 0, sizeof (sa));
 	sa.sa_handler = on_alarm;
 	sigemptyset(&sa.sa_mask);
@@ -136,125 +167,97 @@ stop_preemption(void)
 }
 
 static void
-thread_trampoline(int signo)
-{
-	(void)signo;
-
-	/*
-	 * Running on the new stack (SA_ONSTACK). The saved context resumes
-	 * here, on this stack, when the scheduler first enters the thread.
-	 */
-	if (sigsetjmp(new_thread->ctx, 0) == 0) {
-		/* savesigs was 1 in scheduler_create, so SIGUSR1 turns back on. */
-		siglongjmp(create_ctx, 1);
-	}
-
-	unblock_alarm();
-	current->fnc(current->arg);
-	current->done = 1;
-	block_alarm();
-	siglongjmp(sched_ctx, 1);
-}
-
-int
-scheduler_create(scheduler_fnc_t fnc, void *arg)
-{
-	struct thread *t;
-	void *mem;
-	size_t pagesz;
-	stack_t ss;
-	stack_t old_ss;
-	struct sigaction sa;
-	struct sigaction old_sa;
-
-	pagesz = page_size();
-	mem = malloc(THREAD_STACK_SIZE + pagesz);
-	if (!mem) {
-		return -1;
-	}
-	t = malloc(sizeof (*t));
-	if (!t) {
-		FREE(mem);
-		return -1;
-	}
-	memset(t, 0, sizeof (*t));
-	t->fnc = fnc;
-	t->arg = arg;
-	t->stack_mem = mem;
-
-	memset(&ss, 0, sizeof (ss));
-	ss.ss_sp = memory_align(mem, pagesz);
-	ss.ss_size = THREAD_STACK_SIZE;
-	if (sigaltstack(&ss, &old_ss)) {
-		FREE(t->stack_mem);
-		FREE(t);
-		return -1;
-	}
-
-	memset(&sa, 0, sizeof (sa));
-	sa.sa_handler = thread_trampoline;
-	sa.sa_flags = SA_ONSTACK;
-	sigemptyset(&sa.sa_mask);
-	if (sigaction(SIGUSR1, &sa, &old_sa)) {
-		sigaltstack(&old_ss, NULL);
-		FREE(t->stack_mem);
-		FREE(t);
-		return -1;
-	}
-
-	new_thread = t;
-	if (sigsetjmp(create_ctx, 1) == 0) {
-		raise(SIGUSR1);
-	}
-
-	sigaction(SIGUSR1, &old_sa, NULL);
-	sigaltstack(&old_ss, NULL);
-
-	if (!head) {
-		head = t;
-	} else {
-		tail->next = t;
-	}
-	tail = t;
-	return 0;
-}
-
-static void
-destroy_threads(void)
+scheduler_destroy(void)
 {
 	struct thread *t;
 	struct thread *n;
 
-	t = head;
+	t = root;
 	while (t) {
-		n = t->next;
-		FREE(t->stack_mem);
+		n = t->link;
+		FREE(t->stack.mem);
 		FREE(t);
 		t = n;
 	}
-	head = NULL;
-	tail = NULL;
-	current = NULL;
+	root = NULL;
+	curr = NULL;
+}
+
+static int
+alloc_stack(struct thread *t)
+{
+	size_t pagesz;
+	size_t npages;
+	void *mem;
+	void *aligned;
+
+	pagesz = page_size();
+	npages = (64 * 1024) / pagesz;
+	if (npages < 1) {
+		npages = 1;
+	}
+	/* One extra page so aligning still leaves npages pages. */
+	mem = malloc((npages + 1) * pagesz);
+	if (!mem) {
+		return -1;
+	}
+	aligned = memory_align(mem, pagesz);
+	t->stack.mem = mem;
+	t->stack.sp = (char *)aligned + npages * pagesz;
+	return 0;
+}
+
+int
+scheduler_create(scheduler_fnc_t fn, void *arg)
+{
+	struct thread *t;
+
+	if (!fn) {
+		return -1;
+	}
+	t = malloc(sizeof (*t));
+	if (!t) {
+		return -1;
+	}
+	memset(t, 0, sizeof (*t));
+	t->status = INIT;
+	t->code.function = fn;
+	t->code.argument = arg;
+	if (alloc_stack(t)) {
+		FREE(t);
+		return -1;
+	}
+	t->link = root;
+	root = t;
+	return 0;
+}
+
+void
+scheduler_yield(void)
+{
+	/*
+	 * setjmp returns 0 the first time: this thread is stopping.
+	 * It returns 1 when schedule() longjmp's back: keep running.
+	 * Block the alarm before leaving so a tick cannot hit schedule().
+	 */
+	block_alarm();
+	if (setjmp(curr->ctx) == 0) {
+		curr->status = RUNNABLE;
+		longjmp(ctx, 1);
+	}
+	unblock_alarm();
 }
 
 void
 scheduler_execute(void)
 {
-	if (!head) {
+	if (!root) {
 		return;
 	}
 	start_preemption();
-	current = NULL;
-	for (;;) {
-		current = next_thread(current);
-		if (!current) {
-			break;
-		}
-		if (sigsetjmp(sched_ctx, 0) == 0) {
-			siglongjmp(current->ctx, 1);
-		}
-	}
+	setjmp(ctx);
+	schedule();
 	stop_preemption();
-	destroy_threads();
+	scheduler_destroy();
 	unblock_alarm();
 }
