@@ -31,9 +31,15 @@ test_sched: scheduler.c system.c tests/test_sched.c
 test: test_sched
 	./test_sched
 
-.PHONY: test
+# demo/ is not part of $(wildcard *.c), so this does not change ./cs238.
+extra_credit: scheduler.c system.c demo/extra_credit.c
+	@echo "[CC]" extra_credit
+	@$(CC) $(CFLAGS) -I. -o extra_credit scheduler.c system.c demo/extra_credit.c $(LDLIBS)
+	./extra_credit
+
+.PHONY: test extra_credit
 
 clean:
-	@rm -f $(DEST) test_sched *.so *.o *.d *~ *#
+	@rm -f $(DEST) test_sched extra_credit *.so *.o *.d *~ *#
 
 -include $(OBJS:.o=.d)
