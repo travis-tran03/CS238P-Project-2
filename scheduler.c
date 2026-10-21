@@ -15,7 +15,7 @@
 #include "system.h"
 #include "scheduler.h"
 
-#define num_pages = 100
+#define NUM_PAGES 100
 /**
  * Needs:
  *   setjmp()
@@ -29,7 +29,7 @@ struct thread {
         INIT, 
         RUNNING, 
         RUNNABLE, 
-        TERMINATED,
+        TERMINATED
     } status;
     struct {
         void *mem;
@@ -39,66 +39,112 @@ struct thread {
         scheduler_fnc_t fnc;
         void *arg;
     } code;
-    jmp_buf ctx;
+    jmp_buf thread_ctx;
     struct thread *link;
-}
+};
 
-struct thread *root = NULL;
-struct thread *curr = NULL;
-jmp_buf global_ctx; //Inspired from lecture notes, still don't understand
+static struct thread *root = NULL;
+static struct thread *curr = NULL;
+static jmp_buf global_ctx; 
 
-int scheduler_create(fnc, arg){
-    struct thread *t;
-    t = malloc(sizeof(struct thread));
-    t->status = INIT;
-    t->code.fnc = fnc;
-    t->code.arg = arg;
-    t->stack.mem = malloc((num_pages * page_size) + 1);
-    t->stack.sp = memory_align(t->stack.mem, P) + (num_pages + page_size);
-    t->link = root;
-    root = t;
-    return 0;
-}
+static void destroy(void);
+static struct thread *thread_candidate(void);
+static void schedule(void);
 
-void destory (void){
+static void destroy (void){
     struct thread *t;
     while (root){
         t = root;
         root = root->link;
-        // here I need to free t's mem and sp, not sure exactly how to do that
+        FREE(t->stack.mem);
         FREE(t);
-        return;
     }
+    return;
 }
 
 static struct thread *thread_candidate(void){
-    //step 1, needs to traverse the linked list, 
-    //1.a implement red robin
-    //1.b find a RUNNABLE or INIT thread 
-    //1.c either return it or return NULL
-}
 
-void scheduler_execute(void){
-    setjmp(*global_ctx);
-    schedule();
-    destroy();
+    struct thread *rr_helper;
+
+    rr_helper = curr ? curr->link : root;
+
+    while (rr_helper){
+        if (INIT == rr_helper->status || RUNNABLE == rr_helper->status){
+            return rr_helper;
+        }
+        rr_helper = rr_helper->link;
+    }
+    rr_helper = root;
+    while (rr_helper){
+        if (INIT == rr_helper->status || RUNNABLE == rr_helper->status){
+            return rr_helper;
+        }
+        rr_helper = rr_helper->link;
+    }
+
+    return NULL;
 }
 
 static void schedule(void){
-    struct thread cand = thread_candidate();
+    void *sp;
+    struct thread *cand = thread_candidate();
     if (!cand){return;}
+    curr = cand;
 
-    // If its INIT, use assemply machine code to stick cand->sp into CPU sp
+    if (RUNNABLE == cand->status){
+        cand->status = RUNNING;
+        longjmp(cand->thread_ctx, 1);
+    }
+    else if(INIT == cand->status){
+        cand->status = RUNNING;
+        sp = cand->stack.sp;
+        __asm__ volatile ("mov sp, %[rs]" : : [rs] "r" (sp) : "memory"); /* Im on arm64 architecture*/
+        curr->code.fnc(curr->code.arg);
+        curr->status = TERMINATED;
+        longjmp(global_ctx, 1);
+    }
+}
 
-    // If its RUNANBLE, we just need to long jump to it? 
-    // Then set cand->status to RUNNING
-    // longjump(cand->ctx; 1) ?????? Not sure
+int scheduler_create(scheduler_fnc_t fnc, void *arg){
+    struct thread *t;
+
+    t = malloc(sizeof(struct thread));
+    if (NULL == t){
+        TRACE("malloc NULL in scheduler_create - THREAD");
+        return -1;
+    }
+
+    t->status = INIT;
+
+    t->code.fnc = fnc;
+    t->code.arg = arg;
+
+    t->stack.mem = malloc((NUM_PAGES + 1) * page_size());
+    if (NULL == t->stack.mem){
+        TRACE("malloc NULL in scheduler_create - MEM");
+        FREE(t);
+        return -1;
+    }
+    t->stack.sp = (char *)memory_align(t->stack.mem, page_size()) + (NUM_PAGES * page_size());
+
+    t->link = root;
+    root = t;
+
+    return 0;
+}
+
+void scheduler_execute(void){
+    setjmp(global_ctx);
+    schedule();
+    destroy();
+    curr = NULL;
 }
 
 void scheduler_yield(void){
-    // decide based off of return from setjmp()
 
-    // 0 should be become runnable, jump to scheduler, and longjump global context
-
-    // what do i do if 1? nothing?
+    if (setjmp(curr->thread_ctx) == 0) {
+        curr->status = RUNNABLE;
+        longjmp(global_ctx, 1);
+    }
+    return;
 }
