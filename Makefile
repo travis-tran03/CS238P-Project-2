@@ -24,17 +24,19 @@ all: $(OBJS)
 	@$(CC) $(CFLAGS) -MM $< > $*.d
 
 # tests/ is not part of $(wildcard *.c), so this does not change ./cs238.
+# -DPREEMPT turns on the 1-second timer (the sleep, cpu and twice tests need it).
 test_sched: scheduler.c system.c tests/test_sched.c
 	@echo "[CC]" test_sched
-	@$(CC) $(CFLAGS) -I. -o test_sched scheduler.c system.c tests/test_sched.c $(LDLIBS)
+	@$(CC) $(CFLAGS) -DPREEMPT -I. -o test_sched scheduler.c system.c tests/test_sched.c $(LDLIBS)
 
 test: test_sched
 	./test_sched
 
 # demo/ is not part of $(wildcard *.c), so this does not change ./cs238.
+# -DPREEMPT turns on the 1-second timer.
 extra_credit: scheduler.c system.c demo/extra_credit.c
 	@echo "[CC]" extra_credit
-	@$(CC) $(CFLAGS) -I. -o extra_credit scheduler.c system.c demo/extra_credit.c $(LDLIBS)
+	@$(CC) $(CFLAGS) -DPREEMPT -I. -o extra_credit scheduler.c system.c demo/extra_credit.c $(LDLIBS)
 	./extra_credit
 
 .PHONY: test extra_credit
